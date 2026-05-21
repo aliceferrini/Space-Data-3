@@ -3,6 +3,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader, Subset
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider
 from sklearn.model_selection import KFold
@@ -137,6 +139,7 @@ def plot_noisy_clean_predicted(model, dataset, index, title, device):
     save_dir = os.path.dirname(os.path.abspath(__file__))
     save_path = os.path.join(save_dir, f"{safe_title}_idx{index}.png")
     plt.savefig(save_path, dpi=200)
+    plt.close()
     print(f"Saved figure to: {save_path}")
     # plt.show() removed to avoid blocking execution in non-interactive environments
     
@@ -145,9 +148,9 @@ def plot_noisy_clean_predicted(model, dataset, index, title, device):
 if __name__ == "__main__":
 
     # (A) Load data (shape: (N, H, W))
-    _dir = os.path.dirname(os.path.abspath(__file__))
-    noisy_data = np.load(os.path.join(_dir, "noisy_images_small_1k (1).npy")).astype(np.float32)
-    clean_data = np.load(os.path.join(_dir, "clean_images_small_1k (1).npy")).astype(np.float32)
+    _dir = "/cluster/scratch/azecchin/spacedata/images"
+    noisy_data = np.load(os.path.join(_dir, "noisy_train_19k_harder.npy")).astype(np.float32)
+    clean_data = np.load(os.path.join(_dir, "clean_train_19k_harder.npy")).astype(np.float32)
 
     # Normalise to [0, 1]
     noisy_data = normalize_data(noisy_data)
@@ -213,6 +216,7 @@ if __name__ == "__main__":
     save_dir = os.path.dirname(os.path.abspath(__file__))
     save_path = os.path.join(save_dir, f"{K}-fold_CV_loss.png")
     plt.savefig(save_path, dpi=200)
+    plt.close()
     print(f"Saved CV loss plot to: {save_path}")
     # plt.show() removed to avoid blocking execution in non-interactive environments
 
