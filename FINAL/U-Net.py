@@ -23,47 +23,52 @@ def _double_conv(in_ch, out_ch, dropout_rate):
     )
 
 
-class CNN(nn.Module):
-    def __init__(self, in_channels=1, base_channels=64, dropout_rate=0.2):
-        super(CNN, self).__init__()
-        c = base_channels
+class Model(nn.Module):
+    """
+    U-Net for denoising 64x64 lunar surface images.
+    Spatial flow: 64 -> 32 -> 16 -> 8 (bottleneck) -> 16 -> 32 -> 64
+    """
+    def __init__(self, in_channels=1, base_channels=32, dropout_rate=0.2):
+        super(Model, self).__init__()
+        c = base_channels  # 32
 
-        # Encoder
-        self.enc1 = _double_conv(in_channels, c,     dropout_rate)
-        self.enc2 = _double_conv(c,           c * 2, dropout_rate)
-        self.enc3 = _double_conv(c * 2,       c * 4, dropout_rate)
-
+        # Encoder: 64x64 -> 32x32 -> 16x16 -> 8x8
+        self.enc1 = _double_conv(in_channels, c,     dropout_rate)  # 64x64, 32ch
+        self.enc2 = _double_conv(c,           c * 2, dropout_rate)  # 32x32, 64ch
+        self.enc3 = _double_conv(c * 2,       c * 4, dropout_rate)  # 16x16, 128ch
         self.pool = nn.MaxPool2d(2)
 
-        # Bottleneck
-        self.bottleneck = _double_conv(c * 4, c * 8, dropout_rate)
+        # Bottleneck at 8x8 — wide receptive field captures grid periodicity
+        self.bottleneck = nn.Sequential(
+            _double_conv(c * 4, c * 8, dropout_rate),               # 8x8, 256ch
+            nn.Conv2d(c * 8, c * 8, kernel_size=3, padding=2, dilation=2, bias=False),
+            nn.BatchNorm2d(c * 8),
+            nn.ReLU(inplace=True),
+        )
 
-        # Decoder
-        self.up3   = nn.ConvTranspose2d(c * 8, c * 4, kernel_size=2, stride=2)
-        self.dec3  = _double_conv(c * 8, c * 4, dropout_rate)
+        # Decoder: 8x8 -> 16x16 -> 32x32 -> 64x64
+        self.up3  = nn.ConvTranspose2d(c * 8, c * 4, kernel_size=2, stride=2)
+        self.dec3 = _double_conv(c * 8, c * 4, dropout_rate)        # 16x16, 128ch
 
-        self.up2   = nn.ConvTranspose2d(c * 4, c * 2, kernel_size=2, stride=2)
-        self.dec2  = _double_conv(c * 4, c * 2, dropout_rate)
+        self.up2  = nn.ConvTranspose2d(c * 4, c * 2, kernel_size=2, stride=2)
+        self.dec2 = _double_conv(c * 4, c * 2, dropout_rate)        # 32x32, 64ch
 
-        self.up1   = nn.ConvTranspose2d(c * 2, c,     kernel_size=2, stride=2)
-        self.dec1  = _double_conv(c * 2, c,     dropout_rate)
+        self.up1  = nn.ConvTranspose2d(c * 2, c,     kernel_size=2, stride=2)
+        self.dec1 = _double_conv(c * 2, c,     dropout_rate)        # 64x64, 32ch
 
         self.out_conv = nn.Conv2d(c, in_channels, kernel_size=1)
         self.sigmoid  = nn.Sigmoid()
 
     def forward(self, x):
-        # Encoder path
         s1 = self.enc1(x)
         s2 = self.enc2(self.pool(s1))
         s3 = self.enc3(self.pool(s2))
 
-        # Bottleneck
         b = self.bottleneck(self.pool(s3))
 
-        # Decoder path with skip connections
-        x = self.dec3(torch.cat([self.up3(b),  s3], dim=1))
-        x = self.dec2(torch.cat([self.up2(x),  s2], dim=1))
-        x = self.dec1(torch.cat([self.up1(x),  s1], dim=1))
+        x = self.dec3(torch.cat([self.up3(b), s3], dim=1))
+        x = self.dec2(torch.cat([self.up2(x), s2], dim=1))
+        x = self.dec1(torch.cat([self.up1(x), s1], dim=1))
 
         return self.sigmoid(self.out_conv(x))
 
@@ -95,7 +100,7 @@ def train_model(train_dataset, val_dataset,
     # --------------------
     # 3) Define model, loss, optimizer
     # --------------------
-    model = CNN(in_channels, base_channels, dropout_rate).to(device)
+    model = Model(in_channels, base_channels, dropout_rate).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=10
