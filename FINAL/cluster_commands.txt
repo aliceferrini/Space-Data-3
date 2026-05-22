@@ -1,0 +1,115 @@
+=== CLUSTER JOB COMMANDS (ETH Euler / SLURM) ===
+
+--- UPLOAD/DOWNLOAD STUFF TO/FROM CLUSTER
+
+# Download results
+scp "azecchin@euler.ethz.ch:/cluster/scratch/azecchin/spacedata/*.png" /path/to/local/folder/
+
+# Upload code
+scp /path/to/local/folder/ azecchin@euler.ethz.ch:/cluster/scratch/azecchin/spacedata
+
+--- MODIFY STUFF IN FOLDER ---  
+
+# Remove files
+rm filename
+
+# Remove all files with the same initial part of the name
+rm <initial_name>*.<filetype>
+
+--- SUBMIT A JOB ---
+
+# Submit a batch script
+sbatch job.sh
+
+# Example job.sh for CNN training:
+# -----------------------------------------------
+# #!/bin/bash
+# #SBATCH --job-name=cnn_train
+# #SBATCH --output=logs/%j_out.txt
+# #SBATCH --error=logs/%j_err.txt
+# #SBATCH --time=04:00:00
+# #SBATCH --ntasks=1
+# #SBATCH --cpus-per-task=4
+# #SBATCH --mem-per-cpu=8G
+# #SBATCH --gpus=1
+#
+# module load gcc/8.2.0 python/3.10.4 cuda/11.8.0
+# source venv/bin/activate
+# python CNN.py
+# -----------------------------------------------
+
+# Submit interactively (for debugging)
+srun --ntasks=1 --cpus-per-task=4 --mem-per-cpu=4G --gpus=1 --time=01:00:00 --pty bash
+
+
+--- MONITOR JOBS ---
+
+# List your running/pending jobs
+squeue -u azecchin
+
+# Detailed info on a specific job
+scontrol show job <job_id>
+
+# Watch queue in real time (refresh every 5s)
+watch -n 5 squeue -u azecchin
+
+# Check job efficiency after completion
+seff <job_id>
+
+# Show job accounting info (runtime, memory used, etc.)
+sacct -j <job_id> --format=JobID,JobName,State,Elapsed,MaxRSS,AllocGPUs
+
+
+--- MANAGE JOBS ---
+
+# Cancel a job
+scancel <job_id>
+
+# Cancel all your jobs
+scancel -u azecchin
+
+# Hold / release a pending job
+scontrol hold <job_id>
+scontrol release <job_id>
+
+
+--- MONITOR OUTPUT IN REAL TIME ---
+
+# Tail the job's stdout log (replace with your actual log path)
+tail -f logs/<job_id>_out.txt
+
+# Tail stderr
+tail -f logs/<job_id>_err.txt
+
+
+--- GPU / NODE INFO ---
+
+# Check available GPU nodes
+sinfo -p gpu
+
+# Check GPU usage on a node (if you have SSH access)
+ssh <node_name> nvidia-smi
+
+# Check overall cluster status
+sinfo
+
+
+--- FILE TRANSFER ---
+
+# Copy files TO the cluster
+scp -r ./FINAL azecchin@euler.ethz.ch:/cluster/scratch/azecchin/spacedata/
+
+# Copy results FROM the cluster
+scp -r azecchin@euler.ethz.ch:/cluster/scratch/azecchin/spacedata/results/ ./results/
+
+# Rsync (faster for repeated syncs, skips unchanged files)
+rsync -avz --progress ./FINAL/ azecchin@euler.ethz.ch:/cluster/scratch/azecchin/spacedata/FINAL/
+
+
+--- STORAGE ---
+
+# Check your scratch quota
+lquota /cluster/scratch/azecchin
+
+# Check disk usage of a folder
+du -sh /cluster/scratch/azecchin/images/
