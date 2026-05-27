@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from sklearn.model_selection import KFold
 import optuna
 
+
 # ==========================================
 # 1. Architecture: ResNet
 # ==========================================
@@ -25,6 +26,7 @@ class ResidualBlock(nn.Module):
         out += identity
         return torch.relu(out)
 
+
 class ResNetDenoiser(nn.Module):
     def __init__(self, in_channels=1, base_channels=64, num_blocks=4, dropout_rate=0.2):
         super(ResNetDenoiser, self).__init__()
@@ -42,7 +44,7 @@ class ResNetDenoiser(nn.Module):
             nn.BatchNorm2d(base_channels),
             nn.ReLU(),
             nn.Conv2d(base_channels, in_channels, kernel_size=1),
-            nn.Tanh() # HYBRID: Using Tanh for superior gradient flow
+            nn.Sigmoid() # WINNING CONFIG: Sigmoid maps perfectly to [0, 1]
         )
 
     def forward(self, x):
@@ -50,26 +52,29 @@ class ResNetDenoiser(nn.Module):
         x = self.res_blocks(x)
         return self.final_conv(x)
 
+
 # ==========================================
 # 2. Pipeline Helpers
 # ==========================================
 def normalize_data(data, data_min=0.0, data_max=255.0):
-    # Scaled to [-1, 1] to match the Tanh activation layer
-    return ((data - data_min) / (data_max - data_min)) * 2.0 - 1.0
+    # WINNING CONFIG: Linear scaling to [0, 1] bounds
+    return (data - data_min) / (data_max - data_min)
+
 
 def mean_squared_error(predictions, targets):
-    # Restored MSE 
+    # WINNING CONFIG: Squares errors to heavily punish and flatten grid lines
     return torch.mean((predictions - targets) ** 2)
+
 
 def train_model(train_dataset, val_dataset,
                 in_channels=1, base_channels=64,
                 dropout_rate=0.2, lr=1e-3, batch_size=256, num_epochs=100):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # high-speed data loaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+    # SPEED OPTIMIZED: persistent_workers=True keeps CPU workers alive across epochs
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, 
                               num_workers=8, pin_memory=True, persistent_workers=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, 
                             num_workers=4, pin_memory=True, persistent_workers=True)
 
     model = ResNetDenoiser(in_channels, base_channels, 4, dropout_rate)
@@ -106,7 +111,7 @@ def train_model(train_dataset, val_dataset,
 
             with torch.cuda.amp.autocast():
                 predictions = model(noisy_batch)
-                loss = mean_squared_error(predictions, clean_batch) # Restored MSE
+                loss = mean_squared_error(predictions, clean_batch)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -123,7 +128,7 @@ def train_model(train_dataset, val_dataset,
                 clean_batch = clean_batch.to(device)
                 with torch.cuda.amp.autocast():
                     predictions = model(noisy_batch)
-                    loss = mean_squared_error(predictions, clean_batch) # Restored MSE
+                    loss = mean_squared_error(predictions, clean_batch)
                 epoch_val_loss += loss.item()
         epoch_val_loss /= len(val_loader)
 
@@ -133,23 +138,19 @@ def train_model(train_dataset, val_dataset,
 
     return model, train_losses, val_losses
 
+
 def plot_noisy_clean_predicted(model, dataset, index, title, device):
     model.eval()
     noisy_img, clean_img = dataset[index]
     with torch.no_grad():
         predicted = model(noisy_img.unsqueeze(0).to(device)).squeeze(0).cpu()
 
-    # Shift from [-1, 1] back to [0, 1] for displaying correctly
-    noisy_display = (noisy_img.squeeze().numpy() + 1.0) / 2.0
-    clean_display = (clean_img.squeeze().numpy() + 1.0) / 2.0
-    pred_display = (predicted.squeeze().numpy() + 1.0) / 2.0
-
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    axes[0].imshow(noisy_display, cmap='gray', vmin=0, vmax=1)
+    axes[0].imshow(noisy_img.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
     axes[0].set_title('Noisy Input')
-    axes[1].imshow(clean_display, cmap='gray', vmin=0, vmax=1)
+    axes[1].imshow(clean_img.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
     axes[1].set_title('Clean Ground Truth')
-    axes[2].imshow(pred_display, cmap='gray', vmin=0, vmax=1)
+    axes[2].imshow(predicted.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
     axes[2].set_title('Predicted (ResNet)')
     for ax in axes: ax.axis('off')
     plt.suptitle(title)
@@ -159,6 +160,7 @@ def plot_noisy_clean_predicted(model, dataset, index, title, device):
     save_dir = os.path.dirname(os.path.abspath(__file__))
     save_path = os.path.join(save_dir, f"Deployed_{safe_title}_idx{index}.png")
     plt.savefig(save_path, dpi=200)
+
 
 # ==========================================
 # 3. Main Execution Block
@@ -247,7 +249,7 @@ if __name__ == "__main__":
     plt.plot(np.mean(all_train_losses, axis=0), label='Avg Train Loss', color='crimson', linewidth=2)
     plt.plot(np.mean(all_val_losses, axis=0), label='Avg Val Loss', color='darkgreen', linewidth=2)
     plt.xlabel('Epoch')
-    plt.ylabel('MSE Loss') # Restored Y-axis label
+    plt.ylabel('MSE Loss')
     plt.title(f'Optimized ResNet {K}-Fold Loss')
     plt.legend()
     plt.tight_layout()
