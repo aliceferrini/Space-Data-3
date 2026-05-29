@@ -9,7 +9,7 @@ import optuna
 
 
 # ==========================================
-# 1. Architecture: Medium ResNet (96 Channels, 5 Blocks)
+# 1. Architecture: Heavyweight ResNet (128 Channels, 8 Blocks)
 # ==========================================
 class ResidualBlock(nn.Module):
     def __init__(self, channels):
@@ -28,7 +28,7 @@ class ResidualBlock(nn.Module):
 
 
 class ResNetDenoiser(nn.Module):
-    def __init__(self, in_channels=1, base_channels=96, num_blocks=5, dropout_rate=0.2):
+    def __init__(self, in_channels=1, base_channels=128, num_blocks=8, dropout_rate=0.2):
         super(ResNetDenoiser, self).__init__()
         self.start_conv = nn.Sequential(
             nn.Conv2d(in_channels, base_channels, kernel_size=5, padding=2),
@@ -61,24 +61,21 @@ def normalize_data(data, data_min=0.0, data_max=255.0):
 
 
 def mean_squared_error(predictions, targets):
-    # STRICTLY MSE TO CRUSH GRID NOISE
     return torch.mean((predictions - targets) ** 2)
 
 
 def train_model(train_dataset, val_dataset,
-                in_channels=1, base_channels=96, num_blocks=5,
-                dropout_rate=0.2, lr=1e-3, batch_size=32, num_epochs=100):
+                in_channels=1, base_channels=128, num_blocks=8,
+                dropout_rate=0.2, lr=1e-3, batch_size=64, num_epochs=100):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # SPEED OPTIMIZED DATA LOADERS FOR EULER CLUSTER
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
-                              num_workers=8, pin_memory=True, persistent_workers=True)
+                              num_workers=10, pin_memory=True, persistent_workers=True, drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
-                            num_workers=4, pin_memory=True, persistent_workers=True)
+                            num_workers=10, pin_memory=True, persistent_workers=True, drop_last=True)
 
     model = ResNetDenoiser(in_channels, base_channels, num_blocks, dropout_rate)
 
-    # MULTI-GPU INTERCEPT
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
 
@@ -89,6 +86,8 @@ def train_model(train_dataset, val_dataset,
     scaler = torch.cuda.amp.GradScaler()
 
     train_losses, val_losses = [], []
+    best_val_loss = float('inf')
+    best_model_weights = None
 
     for epoch in range(num_epochs):
         model.train()
@@ -133,34 +132,62 @@ def train_model(train_dataset, val_dataset,
         val_losses.append(epoch_val_loss)
         scheduler.step(epoch_val_loss)
 
+        if epoch_val_loss < best_val_loss:
+            best_val_loss = epoch_val_loss
+            best_model_weights = model.state_dict().copy()
+
+    # Restore the best weights of this specific run/fold
+    model.load_state_dict(best_model_weights)
     return model, train_losses, val_losses
 
 
-def plot_noisy_clean_predicted(model, dataset, index, title, device):
+# ==========================================
+# 3. Rubric Visualization Helpers
+# ==========================================
+def plot_rubric_train_samples(model, dataset, indices, device):
+    """Plots Noisy, Clean, and Denoised for the report (Requirement 3)"""
     model.eval()
-    noisy_img, clean_img = dataset[index]
-    with torch.no_grad():
-        predicted = model(noisy_img.unsqueeze(0).to(device)).squeeze(0).cpu()
+    fig, axes = plt.subplots(len(indices), 3, figsize=(12, 4 * len(indices)))
 
-    fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    axes[0].imshow(noisy_img.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
-    axes[0].set_title('Noisy Input')
-    axes[1].imshow(clean_img.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
-    axes[1].set_title('Clean Ground Truth')
-    axes[2].imshow(predicted.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
-    axes[2].set_title('Predicted (ResNet)')
-    for ax in axes: ax.axis('off')
-    plt.suptitle(title)
+    for i, idx in enumerate(indices):
+        noisy_img, clean_img = dataset[idx]
+        with torch.no_grad():
+            predicted = model(noisy_img.unsqueeze(0).to(device)).squeeze(0).cpu()
+
+        axes[i, 0].imshow(noisy_img.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
+        axes[i, 0].set_title(f'Train Noisy {idx}')
+        axes[i, 1].imshow(clean_img.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
+        axes[i, 1].set_title(f'Train Clean Truth {idx}')
+        axes[i, 2].imshow(predicted.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
+        axes[i, 2].set_title(f'Train Denoised {idx}')
+        for ax in axes[i]: ax.axis('off')
+
     plt.tight_layout()
+    plt.savefig("Rubric_Train_Visualizations.png", dpi=200)
 
-    safe_title = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in title).strip()
-    save_dir = os.path.dirname(os.path.abspath(__file__))
-    save_path = os.path.join(save_dir, f"Deployed_{safe_title}_idx{index}.png")
-    plt.savefig(save_path, dpi=200)
+
+def plot_rubric_test_samples(model, noisy_tensor, indices, device):
+    """Plots Noisy and Denoised for the blind test set for the report"""
+    model.eval()
+    fig, axes = plt.subplots(len(indices), 2, figsize=(8, 4 * len(indices)))
+
+    for i, idx in enumerate(indices):
+        noisy_img = noisy_tensor[idx]
+        with torch.no_grad():
+            predicted = model(noisy_img.unsqueeze(0).to(device)).squeeze(0).cpu()
+
+        axes[i, 0].imshow(noisy_img.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
+        axes[i, 0].set_title(f'Test Noisy {idx}')
+        axes[i, 1].imshow(predicted.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
+        axes[i, 1].set_title(f'Test Denoised {idx}')
+        for ax in axes[i]: ax.axis('off')
+
+    plt.tight_layout()
+    plt.savefig("Rubric_Test_Visualizations.png", dpi=200)
 
 
 # ==========================================
-# 3. Main Execution Block
+# 4. Main Execution Block
 # ==========================================
 if __name__ == "__main__":
 
@@ -168,15 +195,22 @@ if __name__ == "__main__":
     print(f"Hardware allocated: {device}")
 
     _dir = os.path.dirname(os.path.abspath(__file__))
-    noisy_data = np.load(os.path.join(_dir, "noisy_train_19k_harder.npy")).astype(np.float32)
-    clean_data = np.load(os.path.join(_dir, "clean_train_19k_harder.npy")).astype(np.float32)
 
-    noisy_tensor = torch.tensor(normalize_data(noisy_data)).unsqueeze(1)
-    clean_tensor = torch.tensor(normalize_data(clean_data)).unsqueeze(1)
-    dataset = TensorDataset(noisy_tensor, clean_tensor)
+    # --- DATA LOADING ---
+    print("\nLoading Training Data (19k)...")
+    noisy_train_data = np.load(os.path.join(_dir, "noisy_train_19k_harder.npy")).astype(np.float32)
+    clean_train_data = np.load(os.path.join(_dir, "clean_train_19k_harder.npy")).astype(np.float32)
 
-    # --- PHASE 1: SAFE, FULL-POWER OPTUNA SWEEP ---
-    print("\n--- Phase 1: Commencing Automated Optuna Hyperparameter Sweep ---")
+    full_noisy_tensor = torch.tensor(normalize_data(noisy_train_data)).unsqueeze(1)
+    full_clean_tensor = torch.tensor(normalize_data(clean_train_data)).unsqueeze(1)
+    dataset = TensorDataset(full_noisy_tensor, full_clean_tensor)
+
+    print("\nLoading Blind Test Set (500)...")
+    blind_test_data = np.load(os.path.join(_dir, "noisy_val_500_harder.npy")).astype(np.float32)
+    blind_test_tensor = torch.tensor(normalize_data(blind_test_data)).unsqueeze(1)
+
+    # --- PHASE 1: AUTOMATED OPTUNA SWEEP ---
+    print("\n--- Phase 1: Commencing Scaled Optuna Sweep (Rubric: Config Analysis) ---")
 
     sweep_size = int(0.1 * len(dataset))
     sweep_train_size = int(0.8 * sweep_size)
@@ -187,48 +221,43 @@ if __name__ == "__main__":
 
     def objective(trial):
         lr = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
-        # BATCH SIZE LIMITS: 32, 64, 128 to push the GPUs to their peak safely
-        batch_size = trial.suggest_categorical("batch_size", [32, 64, 128])
+        # VRAM Safe constraint: The 128-channel network is massive. Max batch size 64 for 11GB GPUs.
+        batch_size = trial.suggest_categorical("batch_size", [32, 64])
         dropout_rate = trial.suggest_float("dropout_rate", 0.1, 0.4)
 
-        # Sweeping on the Medium Architecture with the full 15 epochs
         _, _, val_losses = train_model(
             sweep_train, sweep_val,
-            base_channels=96, num_blocks=5, dropout_rate=dropout_rate,
+            base_channels=128, num_blocks=8, dropout_rate=dropout_rate,
             lr=lr, batch_size=batch_size, num_epochs=15
         )
         return val_losses[-1]
 
 
-    # Full 15 trials restored
     study = optuna.create_study(direction="minimize")
     study.optimize(objective, n_trials=15)
 
-    print("\n[Sweep Complete] Best Parameters Autonomously Found:")
     best_params = study.best_trial.params
-    for key, value in best_params.items():
-        print(f"  {key}: {value}")
+    print(f"\n[Sweep Complete] Best Parameters Autonomously Found: {best_params}")
 
-    # --- PHASE 2: 5-FOLD CV DEPLOYMENT TRAINING ---
-    print("\n--- Phase 2: Commencing Full 5-Fold Training with Optuna Parameters ---")
+    # --- PHASE 2: MANDATORY K-FOLD CROSS VALIDATION ---
+    print("\n--- Phase 2: Commencing Heavyweight 5-Fold Cross Validation ---")
 
     K = 5
     kf = KFold(n_splits=K, shuffle=True, random_state=42)
 
     all_train_losses, all_val_losses = [], []
-    best_val_loss = float('inf')
-    best_model, best_train_subset, best_val_subset = None, None, None
+    best_overall_val_loss = float('inf')
+    master_model = None
 
     for fold, (train_idx, val_idx) in enumerate(kf.split(np.arange(len(dataset)))):
         print(f"\n--- Fold {fold + 1}/{K} ---")
         train_subset = Subset(dataset, train_idx)
         val_subset = Subset(dataset, val_idx)
 
-        # Automatically feeding Optuna's best choices into the 96-channel network
         model, train_losses, val_losses = train_model(
             train_subset, val_subset,
-            base_channels=96,
-            num_blocks=5,
+            base_channels=128,
+            num_blocks=8,
             dropout_rate=best_params["dropout_rate"],
             lr=best_params["lr"],
             batch_size=best_params["batch_size"],
@@ -238,34 +267,53 @@ if __name__ == "__main__":
         all_train_losses.append(train_losses)
         all_val_losses.append(val_losses)
 
-        if val_losses[-1] < best_val_loss:
-            best_val_loss = val_losses[-1]
-            best_model = model
-            best_train_subset, best_val_subset = train_subset, val_subset
+        # We keep the absolute best model across all folds for the final inference
+        if val_losses[-1] < best_overall_val_loss:
+            best_overall_val_loss = val_losses[-1]
+            master_model = model
+            print(f"*** New Master Model saved from Fold {fold + 1} ***")
 
-    # --- PHASE 3: METRICS & EXPORT ---
-    print("\n--- Phase 3: Exporting Deployment Assets ---")
+    # --- PHASE 3: METRICS & EXPORT FOR REPORT ---
+    print("\n--- Phase 3: Generating Rubric Visualizations ---")
 
-    plt.figure(figsize=(8, 4))
-    for tl, vl in zip(all_train_losses, all_val_losses):
-        plt.plot(tl, alpha=0.25, color='crimson')
-        plt.plot(vl, alpha=0.25, color='darkgreen')
-    plt.plot(np.mean(all_train_losses, axis=0), label='Avg Train Loss', color='crimson', linewidth=2)
-    plt.plot(np.mean(all_val_losses, axis=0), label='Avg Val Loss', color='darkgreen', linewidth=2)
+    # Plot all folds on one graph to satisfy Cross-Validation report requirement
+    plt.figure(figsize=(10, 6))
+    for i, (tl, vl) in enumerate(zip(all_train_losses, all_val_losses)):
+        plt.plot(tl, alpha=0.3, label=f'Fold {i + 1} Train' if i == 0 else "")
+        plt.plot(vl, alpha=0.7, linestyle='--', label=f'Fold {i + 1} Val' if i == 0 else "")
+
     plt.xlabel('Epoch')
     plt.ylabel('MSE Loss')
-    plt.title(f'Optimized Medium ResNet {K}-Fold Loss')
+    plt.title(f'Heavyweight ResNet K-Fold Cross Validation (K={K})')
     plt.legend()
     plt.tight_layout()
-    plt.savefig(os.path.join(_dir, "Deployed_5-fold_CV_loss.png"), dpi=200)
+    plt.savefig(os.path.join(_dir, "Rubric_KFold_Losses.png"), dpi=200)
 
-    best_model.eval()
-    plot_noisy_clean_predicted(best_model, best_train_subset, 0, "Best Fold Training Sample", device)
-    plot_noisy_clean_predicted(best_model, best_val_subset, 0, "Best Fold Validation Sample", device)
+    # Generate the 2 train and 2 test image plots for the PDF
+    plot_rubric_train_samples(master_model, dataset, [0, 42], device)
+    plot_rubric_test_samples(master_model, blind_test_tensor, [0, 42], device)
 
-    # Strip the DataParallel 'module.' wrapper before saving the deployment weights
-    weights_path = os.path.join(_dir, "ResNet_Best_Weights.pth")
-    weights_to_save = best_model.module.state_dict() if isinstance(best_model,
-                                                                   nn.DataParallel) else best_model.state_dict()
-    torch.save(weights_to_save, weights_path)
-    print(f"SUCCESS: Saved deployment-ready weights to: {weights_path}")
+    # --- PHASE 4: FINAL BLIND TEST SET PREDICTION ---
+    print("\n--- Phase 4: Generating Final .npz Submission File ---")
+
+    master_model.eval()
+    all_predictions = []
+
+    # Process the 500 test images in batches
+    test_loader = DataLoader(TensorDataset(blind_test_tensor), batch_size=64, shuffle=False)
+
+    with torch.no_grad():
+        for batch in test_loader:
+            noisy_batch = batch[0].to(device)
+            predicted_batch = master_model(noisy_batch).cpu().numpy()
+            all_predictions.append(predicted_batch)
+
+    final_output_array = np.concatenate(all_predictions, axis=0)
+    final_output_array = final_output_array.squeeze(1)  # Remove channel dimension to match input (500, 128, 128)
+
+    # EXPORTING THE NPZ FILE FOR GRADING (RENAME "Canim_Group" IF NECESSARY)
+    submission_file = os.path.join(_dir, "Canim_Group_prediction.npz")
+    np.savez(submission_file, prediction=final_output_array)
+
+    print(f"\nSUCCESS: Pipeline Complete.")
+    print(f"Your prediction file is ready: {submission_file}")
