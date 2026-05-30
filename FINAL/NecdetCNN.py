@@ -207,18 +207,18 @@ if __name__ == "__main__":
     print("\nApplying Fixed-Pattern Sensor Noise Filter...")
     noise_filter = np.load(os.path.join(_dir, "master_noise_filter_19k.npy")).astype(np.float32)
 
-    # Subtracting the static sensor noise and clipping to valid image boundaries (0-255)
+    # FIX: Create new variables for filtered data so we DON'T overwrite the raw arrays!
     filtered_noisy_train_data = np.clip(noisy_train_data - noise_filter, 0.0, 255.0)
     filtered_blind_test_data = np.clip(blind_test_data - noise_filter, 0.0, 255.0)
 
-    # Proceed to Normalize and Convert to Tensors
+    # Proceed to Normalize and Convert FILTERED Data to Tensors (for training)
     full_noisy_tensor = torch.tensor(normalize_data(filtered_noisy_train_data)).unsqueeze(1)
     full_clean_tensor = torch.tensor(normalize_data(clean_train_data)).unsqueeze(1)
     dataset = TensorDataset(full_noisy_tensor, full_clean_tensor)
 
     blind_test_tensor = torch.tensor(normalize_data(filtered_blind_test_data)).unsqueeze(1)
     
-    # Save the raw tensors specifically for the visualizations
+    # FIX: Convert RAW data to tensors specifically for the "Before" pictures in the plot
     raw_noisy_train_tensor = torch.tensor(normalize_data(noisy_train_data)).unsqueeze(1)
     raw_blind_test_tensor = torch.tensor(normalize_data(blind_test_data)).unsqueeze(1)
 
@@ -303,6 +303,7 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.savefig(os.path.join(_dir, "Rubric_KFold_Losses.png"), dpi=200)
 
+    # FIX: Pass the raw tensors into the plotting functions!
     plot_rubric_train_samples(master_model, dataset, raw_noisy_train_tensor, [0, 42], device)
     plot_rubric_test_samples(master_model, blind_test_tensor, raw_blind_test_tensor, [0, 42], device)
 
@@ -325,6 +326,10 @@ if __name__ == "__main__":
 
     submission_file = os.path.join(_dir, "Canim_Group_prediction.npz")
     np.savez(submission_file, prediction=final_output_array)
+
+    # FIX: Save the PyTorch weights so they don't vanish!
+    weights_file = os.path.join(_dir, "ResNet_Best_Weights.pth")
+    torch.save(master_model.state_dict(), weights_file)
 
     print(f"\nSUCCESS: Pipeline Complete.")
     print(f"Your prediction file is ready: {submission_file}")
