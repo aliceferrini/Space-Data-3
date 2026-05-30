@@ -136,7 +136,6 @@ def train_model(train_dataset, val_dataset,
             best_val_loss = epoch_val_loss
             best_model_weights = model.state_dict().copy()
 
-    # Restore the best weights of this specific run/fold
     model.load_state_dict(best_model_weights)
     return model, train_losses, val_losses
 
@@ -144,17 +143,17 @@ def train_model(train_dataset, val_dataset,
 # ==========================================
 # 3. Rubric Visualization Helpers
 # ==========================================
-def plot_rubric_train_samples(model, dataset, indices, device):
-    """Plots Noisy, Clean, and Denoised for the report (Requirement 3)"""
+def plot_rubric_train_samples(model, dataset, raw_noisy_tensor, indices, device):
     model.eval()
     fig, axes = plt.subplots(len(indices), 3, figsize=(12, 4 * len(indices)))
 
     for i, idx in enumerate(indices):
-        noisy_img, clean_img = dataset[idx]
+        filtered_img, clean_img = dataset[idx]
+        raw_noisy_img = raw_noisy_tensor[idx]
         with torch.no_grad():
-            predicted = model(noisy_img.unsqueeze(0).to(device)).squeeze(0).cpu()
+            predicted = model(filtered_img.unsqueeze(0).to(device)).squeeze(0).cpu()
 
-        axes[i, 0].imshow(noisy_img.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
+        axes[i, 0].imshow(raw_noisy_img.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
         axes[i, 0].set_title(f'Train Noisy {idx}')
         axes[i, 1].imshow(clean_img.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
         axes[i, 1].set_title(f'Train Clean Truth {idx}')
@@ -166,17 +165,17 @@ def plot_rubric_train_samples(model, dataset, indices, device):
     plt.savefig("Rubric_Train_Visualizations.png", dpi=200)
 
 
-def plot_rubric_test_samples(model, noisy_tensor, indices, device):
-    """Plots Noisy and Denoised for the blind test set for the report"""
+def plot_rubric_test_samples(model, filtered_tensor, raw_noisy_tensor, indices, device):
     model.eval()
     fig, axes = plt.subplots(len(indices), 2, figsize=(8, 4 * len(indices)))
 
     for i, idx in enumerate(indices):
-        noisy_img = noisy_tensor[idx]
+        filtered_img = filtered_tensor[idx]
+        raw_noisy_img = raw_noisy_tensor[idx]
         with torch.no_grad():
-            predicted = model(noisy_img.unsqueeze(0).to(device)).squeeze(0).cpu()
+            predicted = model(filtered_img.unsqueeze(0).to(device)).squeeze(0).cpu()
 
-        axes[i, 0].imshow(noisy_img.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
+        axes[i, 0].imshow(raw_noisy_img.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
         axes[i, 0].set_title(f'Test Noisy {idx}')
         axes[i, 1].imshow(predicted.squeeze().numpy(), cmap='gray', vmin=0, vmax=1)
         axes[i, 1].set_title(f'Test Denoised {idx}')
@@ -201,13 +200,27 @@ if __name__ == "__main__":
     noisy_train_data = np.load(os.path.join(_dir, "noisy_train_19k_harder.npy")).astype(np.float32)
     clean_train_data = np.load(os.path.join(_dir, "clean_train_19k_harder.npy")).astype(np.float32)
 
-    full_noisy_tensor = torch.tensor(normalize_data(noisy_train_data)).unsqueeze(1)
+    print("\nLoading Blind Test Set (500)...")
+    blind_test_data = np.load(os.path.join(_dir, "noisy_val_500_harder.npy")).astype(np.float32)
+
+    # --- NOISE FILTER (PRE-PROCESSING) ---
+    print("\nApplying Fixed-Pattern Sensor Noise Filter...")
+    noise_filter = np.load(os.path.join(_dir, "master_noise_filter_19k.npy")).astype(np.float32)
+
+    # Subtracting the static sensor noise and clipping to valid image boundaries (0-255)
+    filtered_noisy_train_data = np.clip(noisy_train_data - noise_filter, 0.0, 255.0)
+    filtered_blind_test_data = np.clip(blind_test_data - noise_filter, 0.0, 255.0)
+
+    # Proceed to Normalize and Convert to Tensors
+    full_noisy_tensor = torch.tensor(normalize_data(filtered_noisy_train_data)).unsqueeze(1)
     full_clean_tensor = torch.tensor(normalize_data(clean_train_data)).unsqueeze(1)
     dataset = TensorDataset(full_noisy_tensor, full_clean_tensor)
 
-    print("\nLoading Blind Test Set (500)...")
-    blind_test_data = np.load(os.path.join(_dir, "noisy_val_500_harder.npy")).astype(np.float32)
-    blind_test_tensor = torch.tensor(normalize_data(blind_test_data)).unsqueeze(1)
+    blind_test_tensor = torch.tensor(normalize_data(filtered_blind_test_data)).unsqueeze(1)
+    
+    # Save the raw tensors specifically for the visualizations
+    raw_noisy_train_tensor = torch.tensor(normalize_data(noisy_train_data)).unsqueeze(1)
+    raw_blind_test_tensor = torch.tensor(normalize_data(blind_test_data)).unsqueeze(1)
 
     # --- PHASE 1: AUTOMATED OPTUNA SWEEP ---
     print("\n--- Phase 1: Commencing Scaled Optuna Sweep (Rubric: Config Analysis) ---")
@@ -221,8 +234,7 @@ if __name__ == "__main__":
 
     def objective(trial):
         lr = trial.suggest_float("lr", 1e-4, 5e-3, log=True)
-        # VRAM Safe constraint: The 128-channel network is massive. Max batch size 64 for 11GB GPUs.
-        batch_size = trial.suggest_categorical("batch_size", [32, 64])
+        batch_size = 64
         dropout_rate = trial.suggest_float("dropout_rate", 0.1, 0.4)
 
         _, _, val_losses = train_model(
@@ -237,9 +249,10 @@ if __name__ == "__main__":
     study.optimize(objective, n_trials=15)
 
     best_params = study.best_trial.params
+    best_params["batch_size"] = 64
     print(f"\n[Sweep Complete] Best Parameters Autonomously Found: {best_params}")
 
-    # --- PHASE 2: MANDATORY K-FOLD CROSS VALIDATION ---
+    # --- PHASE 2: MANDATORY K-FOLD CROSS Validation ---
     print("\n--- Phase 2: Commencing Heavyweight 5-Fold Cross Validation ---")
 
     K = 5
@@ -267,7 +280,6 @@ if __name__ == "__main__":
         all_train_losses.append(train_losses)
         all_val_losses.append(val_losses)
 
-        # We keep the absolute best model across all folds for the final inference
         if val_losses[-1] < best_overall_val_loss:
             best_overall_val_loss = val_losses[-1]
             master_model = model
@@ -276,22 +288,23 @@ if __name__ == "__main__":
     # --- PHASE 3: METRICS & EXPORT FOR REPORT ---
     print("\n--- Phase 3: Generating Rubric Visualizations ---")
 
-    # Plot all folds on one graph to satisfy Cross-Validation report requirement
-    plt.figure(figsize=(10, 6))
+    # UPDATED GRAPH FIX: Explicitly labelling every fold and formatting the legend
+    plt.figure(figsize=(12, 7))
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']  # distinct colors for 5 folds
     for i, (tl, vl) in enumerate(zip(all_train_losses, all_val_losses)):
-        plt.plot(tl, alpha=0.3, label=f'Fold {i + 1} Train' if i == 0 else "")
-        plt.plot(vl, alpha=0.7, linestyle='--', label=f'Fold {i + 1} Val' if i == 0 else "")
+        plt.plot(tl, color=colors[i], alpha=0.5, label=f'Fold {i + 1} Train')
+        plt.plot(vl, color=colors[i], alpha=0.8, linestyle='--', label=f'Fold {i + 1} Val')
 
     plt.xlabel('Epoch')
     plt.ylabel('MSE Loss')
     plt.title(f'Heavyweight ResNet K-Fold Cross Validation (K={K})')
-    plt.legend()
+    # Put legend outside the plot so it doesn't block the lines
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='small')
     plt.tight_layout()
     plt.savefig(os.path.join(_dir, "Rubric_KFold_Losses.png"), dpi=200)
 
-    # Generate the 2 train and 2 test image plots for the PDF
-    plot_rubric_train_samples(master_model, dataset, [0, 42], device)
-    plot_rubric_test_samples(master_model, blind_test_tensor, [0, 42], device)
+    plot_rubric_train_samples(master_model, dataset, raw_noisy_train_tensor, [0, 42], device)
+    plot_rubric_test_samples(master_model, blind_test_tensor, raw_blind_test_tensor, [0, 42], device)
 
     # --- PHASE 4: FINAL BLIND TEST SET PREDICTION ---
     print("\n--- Phase 4: Generating Final .npz Submission File ---")
@@ -299,7 +312,6 @@ if __name__ == "__main__":
     master_model.eval()
     all_predictions = []
 
-    # Process the 500 test images in batches
     test_loader = DataLoader(TensorDataset(blind_test_tensor), batch_size=64, shuffle=False)
 
     with torch.no_grad():
@@ -309,9 +321,8 @@ if __name__ == "__main__":
             all_predictions.append(predicted_batch)
 
     final_output_array = np.concatenate(all_predictions, axis=0)
-    final_output_array = final_output_array.squeeze(1)  # Remove channel dimension to match input (500, 128, 128)
+    final_output_array = final_output_array.squeeze(1)
 
-    # EXPORTING THE NPZ FILE FOR GRADING (RENAME "Canim_Group" IF NECESSARY)
     submission_file = os.path.join(_dir, "Canim_Group_prediction.npz")
     np.savez(submission_file, prediction=final_output_array)
 
