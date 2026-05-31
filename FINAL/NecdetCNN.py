@@ -217,7 +217,7 @@ if __name__ == "__main__":
     dataset = TensorDataset(full_noisy_tensor, full_clean_tensor)
 
     blind_test_tensor = torch.tensor(normalize_data(filtered_blind_test_data)).unsqueeze(1)
-    
+
     # FIX: Convert RAW data to tensors specifically for the "Before" pictures in the plot
     raw_noisy_train_tensor = torch.tensor(normalize_data(noisy_train_data)).unsqueeze(1)
     raw_blind_test_tensor = torch.tensor(normalize_data(blind_test_data)).unsqueeze(1)
@@ -287,6 +287,10 @@ if __name__ == "__main__":
 
     # --- PHASE 3: METRICS & EXPORT FOR REPORT ---
     print("\n--- Phase 3: Generating Rubric Visualizations ---")
+
+    print("\n--- Final K-Fold Numerical Results ---")
+    for i, (tl, vl) in enumerate(zip(all_train_losses, all_val_losses)):
+        print(f"Fold {i + 1} | Final Train MSE: {tl[-1]:.6f} | Final Val MSE: {vl[-1]:.6f}")
 
     # UPDATED GRAPH FIX: Explicitly labelling every fold and formatting the legend
     plt.figure(figsize=(12, 7))
