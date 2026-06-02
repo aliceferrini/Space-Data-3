@@ -237,6 +237,11 @@ if __name__ == "__main__":
     plt.close()
     print(f"Saved CV plot to: {cv_path}")
 
+    # ── Save best model ───────────────────────────────────────────────────────
+    model_path = os.path.join(save_dir, "model_best.pth")
+    torch.save(best_model.state_dict(), model_path)
+    print(f"Saved best model to: {model_path}")
+
     # ── Training set image visualizations (2 images) ─────────────────────────
     best_model.eval()
     for idx in [0, 1]:
