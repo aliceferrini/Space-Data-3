@@ -161,7 +161,7 @@ if __name__ == "__main__":
     # ── UPDATE these filenames to match the Task 3 data on the cluster ────────
     TRAIN_NOISY = "noisy_train_19k_harder.npy"
     TRAIN_CLEAN = "clean_train_19k_harder.npy"
-    TEST_NOISY  = "noisy_val_1k_harder.npy"  
+    TEST_NOISY  = "noisy_val_500_harder.npy"  
     # ─────────────────────────────────────────────────────────────────────────
 
     noisy_data = np.load(os.path.join(_dir, TRAIN_NOISY)).astype(np.float32)
