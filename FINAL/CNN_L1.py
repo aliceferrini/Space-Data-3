@@ -46,6 +46,8 @@ criterion = nn.L1Loss()
 def l1_loss(predictions, targets):
     return criterion(predictions, targets)
 
+def mean_squared_error(predictions, targets):
+    return torch.mean((predictions - targets) ** 2)
 
 # ── Training ──────────────────────────────────────────────────────────────────
 def train_model(train_dataset, val_dataset,
@@ -88,7 +90,7 @@ def train_model(train_dataset, val_dataset,
             for noisy_batch, clean_batch in val_loader:
                 noisy_batch = noisy_batch.to(device)
                 clean_batch = clean_batch.to(device)
-                epoch_val_loss += l1_loss(model(noisy_batch), clean_batch).item()
+                epoch_val_loss += mean_squared_error(model(noisy_batch), clean_batch).item()
         epoch_val_loss /= len(val_loader)
 
         train_losses.append(epoch_train_loss)
@@ -97,7 +99,7 @@ def train_model(train_dataset, val_dataset,
 
         if (epoch + 1) % 10 == 0:
             print(f"Epoch [{epoch+1:>3}/{num_epochs}]  "
-                  f"Train L1: {epoch_train_loss:.6f}  |  Val L1: {epoch_val_loss:.6f}")
+                  f"Train L1: {epoch_train_loss:.6f}  |  Val MSE: {epoch_val_loss:.6f}")
 
     return model, train_losses, val_losses
 
@@ -221,21 +223,35 @@ if __name__ == "__main__":
     avg_train = np.mean(all_train_losses, axis=0)
     avg_val   = np.mean(all_val_losses,   axis=0)
 
-    plt.figure(figsize=(8, 4))
+    fig, ax1 = plt.subplots(figsize=(9, 4))
+    ax2 = ax1.twinx()
+
     for tl, vl in zip(all_train_losses, all_val_losses):
-        plt.plot(tl, alpha=0.25, color='steelblue')
-        plt.plot(vl, alpha=0.25, color='darkorange')
-    plt.plot(avg_train, label='Avg Train L1', color='steelblue',  linewidth=2)
-    plt.plot(avg_val,   label='Avg Val L1',   color='darkorange', linewidth=2)
-    plt.xlabel('Epoch')
-    plt.ylabel('L1 Loss')
-    plt.title(f'{K}-Fold Cross-Validation — Base CNN + L1 Loss')
-    plt.legend()
+        ax1.plot(tl, alpha=0.20, color='steelblue')
+        ax2.plot(vl, alpha=0.20, color='darkorange')
+
+    l1, = ax1.plot(avg_train, label='Avg Train L1 (MAE)', color='steelblue',  linewidth=2)
+    l2, = ax2.plot(avg_val,   label='Avg Val MSE',        color='darkorange', linewidth=2)
+
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Train L1 (MAE)', color='steelblue')
+    ax2.set_ylabel('Val MSE',        color='darkorange')
+    ax1.tick_params(axis='y', labelcolor='steelblue')
+    ax2.tick_params(axis='y', labelcolor='darkorange')
+
+    fig.legend([l1, l2], ['Avg Train L1 (MAE)', 'Avg Val MSE'],
+               loc='upper right', bbox_to_anchor=(0.88, 0.88))
+    plt.title(f'{K}-Fold Cross-Validation — CNN (Train: L1 | Val: MSE)')
     plt.tight_layout()
     cv_path = os.path.join(save_dir, "5fold_CV_L1_loss.png")
     plt.savefig(cv_path, dpi=200)
     plt.close()
     print(f"Saved CV plot to: {cv_path}")
+
+    # ── Save loss arrays ──────────────────────────────────────────────────────
+    np.save(os.path.join(save_dir, "train_losses.npy"), np.array(all_train_losses))  # (K, epochs)
+    np.save(os.path.join(save_dir, "val_losses.npy"),   np.array(all_val_losses))    # (K, epochs)
+    print("Saved loss arrays: train_losses.npy, val_losses.npy")
 
     # ── Save best model ───────────────────────────────────────────────────────
     model_path = os.path.join(save_dir, "model_best.pth")
