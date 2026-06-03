@@ -207,7 +207,6 @@ if __name__ == "__main__":
     print("\nApplying Fixed-Pattern Sensor Noise Filter...")
     noise_filter = np.load(os.path.join(_dir, "master_noise_filter_19k.npy")).astype(np.float32)
 
-    # FIX: Create new variables for filtered data so we DON'T overwrite the raw arrays!
     filtered_noisy_train_data = np.clip(noisy_train_data - noise_filter, 0.0, 255.0)
     filtered_blind_test_data = np.clip(blind_test_data - noise_filter, 0.0, 255.0)
 
@@ -218,7 +217,7 @@ if __name__ == "__main__":
 
     blind_test_tensor = torch.tensor(normalize_data(filtered_blind_test_data)).unsqueeze(1)
 
-    # FIX: Convert RAW data to tensors specifically for the "Before" pictures in the plot
+    # Convert RAW data to tensors specifically for the "Before" pictures in the plot
     raw_noisy_train_tensor = torch.tensor(normalize_data(noisy_train_data)).unsqueeze(1)
     raw_blind_test_tensor = torch.tensor(normalize_data(blind_test_data)).unsqueeze(1)
 
@@ -292,7 +291,6 @@ if __name__ == "__main__":
     for i, (tl, vl) in enumerate(zip(all_train_losses, all_val_losses)):
         print(f"Fold {i + 1} | Final Train MSE: {tl[-1]:.6f} | Final Val MSE: {vl[-1]:.6f}")
 
-    # UPDATED GRAPH FIX: Explicitly labelling every fold and formatting the legend
     plt.figure(figsize=(12, 7))
     colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']  # distinct colors for 5 folds
     for i, (tl, vl) in enumerate(zip(all_train_losses, all_val_losses)):
@@ -302,14 +300,13 @@ if __name__ == "__main__":
     plt.xlabel('Epoch')
     plt.ylabel('MSE Loss')
     plt.title(f'Heavyweight ResNet K-Fold Cross Validation (K={K})')
-    # Put legend outside the plot so it doesn't block the lines
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='small')
     plt.tight_layout()
     plt.savefig(os.path.join(_dir, "Rubric_KFold_Losses.png"), dpi=200)
 
-    # FIX: Pass the raw tensors into the plotting functions!
-    plot_rubric_train_samples(master_model, dataset, raw_noisy_train_tensor, [0, 42], device)
-    plot_rubric_test_samples(master_model, blind_test_tensor, raw_blind_test_tensor, [0, 42], device)
+    # FIX: Updated indices specifically requested for the final visualizations
+    plot_rubric_train_samples(master_model, dataset, raw_noisy_train_tensor, [0, 3], device)
+    plot_rubric_test_samples(master_model, blind_test_tensor, raw_blind_test_tensor, [0, 1], device)
 
     # --- PHASE 4: FINAL BLIND TEST SET PREDICTION ---
     print("\n--- Phase 4: Generating Final .npz Submission File ---")
@@ -331,7 +328,6 @@ if __name__ == "__main__":
     submission_file = os.path.join(_dir, "Canim_Group_prediction.npz")
     np.savez(submission_file, prediction=final_output_array)
 
-    # FIX: Save the PyTorch weights so they don't vanish!
     weights_file = os.path.join(_dir, "ResNet_Best_Weights.pth")
     torch.save(master_model.state_dict(), weights_file)
 
