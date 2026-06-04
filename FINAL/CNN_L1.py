@@ -40,14 +40,20 @@ def normalize_data(data, data_min=0.0, data_max=255.0):
     return (data - data_min) / (data_max - data_min)
 
 
-criterion = nn.L1Loss()
+_l1_criterion = nn.L1Loss()
+_l2_criterion = nn.MSELoss()
 
 
-def l1_loss(predictions, targets):
-    return criterion(predictions, targets)
+def compute_mean_psnr(denoised_tensor, reference_tensor, max_val=1.0):
+    psnr_vals = []
+    for pred, ref in zip(denoised_tensor, reference_tensor):
+        mse = torch.mean((pred - ref) ** 2).item()
+        if mse == 0:
+            psnr_vals.append(float('inf'))
+        else:
+            psnr_vals.append(20.0 * np.log10(max_val / np.sqrt(mse)))
+    return float(np.mean(psnr_vals))
 
-def mean_squared_error(predictions, targets):
-    return torch.mean((predictions - targets) ** 2)
 
 # ── Training ──────────────────────────────────────────────────────────────────
 def train_model(train_dataset, val_dataset,
@@ -69,39 +75,74 @@ def train_model(train_dataset, val_dataset,
         optimizer, mode='min', factor=0.5, patience=10
     )
 
-    train_losses, val_losses = [], []
+    train_l1_losses, train_l2_losses = [], []
+    val_l1_losses,   val_l2_losses   = [], []
+
+    best_val_l1   = float('inf')
+    best_val_l2   = float('inf')
+    best_l1_state = None
+    best_l2_state = None
 
     for epoch in range(num_epochs):
+        # ── train ──────────────────────────────────────────────────────────────
         model.train()
-        epoch_train_loss = 0.0
+        epoch_train_l1 = 0.0
+        epoch_train_l2 = 0.0
         for noisy_batch, clean_batch in train_loader:
             noisy_batch = noisy_batch.to(device)
             clean_batch = clean_batch.to(device)
             optimizer.zero_grad()
-            loss = l1_loss(model(noisy_batch), clean_batch)
+            output = model(noisy_batch)
+            loss = _l1_criterion(output, clean_batch)
             loss.backward()
             optimizer.step()
-            epoch_train_loss += loss.item()
-        epoch_train_loss /= len(train_loader)
+            epoch_train_l1 += loss.item()
+            with torch.no_grad():
+                epoch_train_l2 += _l2_criterion(output, clean_batch).item()
+        epoch_train_l1 /= len(train_loader)
+        epoch_train_l2 /= len(train_loader)
 
+        # ── validate ───────────────────────────────────────────────────────────
         model.eval()
-        epoch_val_loss = 0.0
+        epoch_val_l1 = 0.0
+        epoch_val_l2 = 0.0
         with torch.no_grad():
             for noisy_batch, clean_batch in val_loader:
                 noisy_batch = noisy_batch.to(device)
                 clean_batch = clean_batch.to(device)
-                epoch_val_loss += mean_squared_error(model(noisy_batch), clean_batch).item()
-        epoch_val_loss /= len(val_loader)
+                output = model(noisy_batch)
+                epoch_val_l1 += _l1_criterion(output, clean_batch).item()
+                epoch_val_l2 += _l2_criterion(output, clean_batch).item()
+        epoch_val_l1 /= len(val_loader)
+        epoch_val_l2 /= len(val_loader)
 
-        train_losses.append(epoch_train_loss)
-        val_losses.append(epoch_val_loss)
-        scheduler.step(epoch_val_loss)
+        train_l1_losses.append(epoch_train_l1)
+        train_l2_losses.append(epoch_train_l2)
+        val_l1_losses.append(epoch_val_l1)
+        val_l2_losses.append(epoch_val_l2)
+
+        # checkpoint best-epoch states (no extra memory allocation per epoch,
+        # just one snapshot per improvement)
+        if epoch_val_l1 < best_val_l1:
+            best_val_l1   = epoch_val_l1
+            best_l1_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+
+        if epoch_val_l2 < best_val_l2:
+            best_val_l2   = epoch_val_l2
+            best_l2_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+
+        scheduler.step(epoch_val_l1)
 
         if (epoch + 1) % 10 == 0:
             print(f"Epoch [{epoch+1:>3}/{num_epochs}]  "
-                  f"Train L1: {epoch_train_loss:.6f}  |  Val MSE: {epoch_val_loss:.6f}")
+                  f"Train L1: {epoch_train_l1:.6f}  Train L2: {epoch_train_l2:.6f}  |  "
+                  f"Val L1: {epoch_val_l1:.6f}  Val L2: {epoch_val_l2:.6f}")
 
-    return model, train_losses, val_losses
+    return (model,
+            best_l1_state, best_val_l1,
+            best_l2_state, best_val_l2,
+            train_l1_losses, train_l2_losses,
+            val_l1_losses,   val_l2_losses)
 
 
 # ── Plotting ──────────────────────────────────────────────────────────────────
@@ -109,8 +150,32 @@ def _safe(title):
     return "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in title).strip()
 
 
+def plot_cv_losses(all_train, all_val, loss_name, k, save_dir, is_training_loss=True):
+    avg_train = np.mean(all_train, axis=0)
+    avg_val   = np.mean(all_val,   axis=0)
+
+    fig, ax = plt.subplots(figsize=(9, 4))
+    for tl, vl in zip(all_train, all_val):
+        ax.plot(tl, alpha=0.20, color='steelblue')
+        ax.plot(vl, alpha=0.20, color='darkorange')
+
+    ax.plot(avg_train, label=f'Avg Train {loss_name}', color='steelblue',  linewidth=2)
+    ax.plot(avg_val,   label=f'Avg Val {loss_name}',   color='darkorange', linewidth=2)
+
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel(loss_name)
+    ax.legend(loc='upper right')
+
+    note = "(backprop)" if is_training_loss else "(monitor only — backprop uses L1)"
+    plt.title(f'{k}-Fold Cross-Validation — CNN — {loss_name} loss {note}')
+    plt.tight_layout()
+    path = os.path.join(save_dir, f"5fold_CV_{loss_name}_loss.png")
+    plt.savefig(path, dpi=200)
+    plt.close()
+    print(f"Saved CV plot to: {path}")
+
+
 def plot_train_sample(model, dataset, index, title, device, save_dir):
-    """Show clean / noisy / denoised for a labelled training sample."""
     model.eval()
     noisy_img, clean_img = dataset[index]
     with torch.no_grad():
@@ -134,7 +199,6 @@ def plot_train_sample(model, dataset, index, title, device, save_dir):
 
 
 def plot_test_sample(model, noisy_img_tensor, index, title, device, save_dir):
-    """Show noisy / denoised for a test sample (no clean GT available)."""
     model.eval()
     with torch.no_grad():
         predicted = model(noisy_img_tensor.unsqueeze(0).to(device)).squeeze(0).cpu()
@@ -154,6 +218,18 @@ def plot_test_sample(model, noisy_img_tensor, index, title, device, save_dir):
     print(f"Saved: {path}")
 
 
+def denoise_dataset(model, noisy_tensor, batch_size, device):
+    model.eval()
+    pin = device.type == 'cuda'
+    loader = DataLoader(TensorDataset(noisy_tensor), batch_size=batch_size,
+                        shuffle=False, num_workers=4, pin_memory=pin)
+    parts = []
+    with torch.no_grad():
+        for (batch,) in loader:
+            parts.append(model(batch.to(device)).cpu())
+    return torch.cat(parts, dim=0)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
 
@@ -163,7 +239,8 @@ if __name__ == "__main__":
     # ── UPDATE these filenames to match the Task 3 data on the cluster ────────
     TRAIN_NOISY = "noisy_train_19k_harder.npy"
     TRAIN_CLEAN = "clean_train_19k_harder.npy"
-    TEST_NOISY  = "noisy_val_500_harder.npy"  
+    TEST_NOISY  = "noisy_val_500_harder.npy"
+    TEST_CLEAN  = None  # set to filename if a clean test reference is available
     # ─────────────────────────────────────────────────────────────────────────
 
     noisy_data = np.load(os.path.join(_dir, TRAIN_NOISY)).astype(np.float32)
@@ -189,19 +266,26 @@ if __name__ == "__main__":
     indices = np.arange(len(dataset))
     device  = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    all_train_losses  = []
-    all_val_losses    = []
-    best_val_loss     = float('inf')
-    best_model        = None
-    best_train_subset = None
-    best_val_subset   = None
+    all_train_l1, all_train_l2 = [], []
+    all_val_l1,   all_val_l2   = [], []
+
+    global_best_val_l1   = float('inf')
+    global_best_val_l2   = float('inf')
+    global_best_l1_state = None
+    global_best_l2_state = None
+    best_train_subset    = None
+    best_val_subset      = None
 
     for fold, (train_idx, val_idx) in enumerate(kf.split(indices)):
         print(f"\n=== Fold {fold + 1}/{K} ===")
         train_subset = Subset(dataset, train_idx)
         val_subset   = Subset(dataset, val_idx)
 
-        model, train_losses, val_losses = train_model(
+        (model,
+         best_l1_state, best_val_l1,
+         best_l2_state, best_val_l2,
+         train_l1, train_l2,
+         val_l1,   val_l2) = train_model(
             train_subset, val_subset,
             in_channels=1,
             base_channels=BASE_CHANNELS,
@@ -210,103 +294,87 @@ if __name__ == "__main__":
             batch_size=BATCH_SIZE,
             num_epochs=NUM_EPOCHS,
         )
-        all_train_losses.append(train_losses)
-        all_val_losses.append(val_losses)
 
-        if val_losses[-1] < best_val_loss:
-            best_val_loss     = val_losses[-1]
-            best_model        = model
-            best_train_subset = train_subset
-            best_val_subset   = val_subset
+        all_train_l1.append(train_l1)
+        all_train_l2.append(train_l2)
+        all_val_l1.append(val_l1)
+        all_val_l2.append(val_l2)
 
-    # ── CV loss plot ──────────────────────────────────────────────────────────
-    avg_train = np.mean(all_train_losses, axis=0)
-    avg_val   = np.mean(all_val_losses,   axis=0)
+        if best_val_l1 < global_best_val_l1:
+            global_best_val_l1   = best_val_l1
+            global_best_l1_state = best_l1_state
+            best_train_subset    = train_subset
+            best_val_subset      = val_subset
 
-    fig, ax1 = plt.subplots(figsize=(9, 4))
-    ax2 = ax1.twinx()
+        if best_val_l2 < global_best_val_l2:
+            global_best_val_l2   = best_val_l2
+            global_best_l2_state = best_l2_state
 
-    for tl, vl in zip(all_train_losses, all_val_losses):
-        ax1.plot(tl, alpha=0.20, color='steelblue')
-        ax2.plot(vl, alpha=0.20, color='darkorange')
-
-    l1, = ax1.plot(avg_train, label='Avg Train L1 (MAE)', color='steelblue',  linewidth=2)
-    l2, = ax2.plot(avg_val,   label='Avg Val MSE',        color='darkorange', linewidth=2)
-
-    ax1.set_xlabel('Epoch')
-    ax1.set_ylabel('Train L1 (MAE)', color='steelblue')
-    ax2.set_ylabel('Val MSE',        color='darkorange')
-    ax1.tick_params(axis='y', labelcolor='steelblue')
-    ax2.tick_params(axis='y', labelcolor='darkorange')
-
-    fig.legend([l1, l2], ['Avg Train L1 (MAE)', 'Avg Val MSE'],
-               loc='upper right', bbox_to_anchor=(0.88, 0.88))
-    plt.title(f'{K}-Fold Cross-Validation — CNN (Train: L1 | Val: MSE)')
-    plt.tight_layout()
-    cv_path = os.path.join(save_dir, "5fold_CV_L1_loss.png")
-    plt.savefig(cv_path, dpi=200)
-    plt.close()
-    print(f"Saved CV plot to: {cv_path}")
+    # ── CV loss plots ─────────────────────────────────────────────────────────
+    plot_cv_losses(all_train_l1, all_val_l1, 'L1', K, save_dir, is_training_loss=True)
+    plot_cv_losses(all_train_l2, all_val_l2, 'L2', K, save_dir, is_training_loss=False)
 
     # ── Save loss arrays ──────────────────────────────────────────────────────
-    np.save(os.path.join(save_dir, "train_losses.npy"), np.array(all_train_losses))  # (K, epochs)
-    np.save(os.path.join(save_dir, "val_losses.npy"),   np.array(all_val_losses))    # (K, epochs)
-    print("Saved loss arrays: train_losses.npy, val_losses.npy")
+    np.save(os.path.join(save_dir, "train_l1_losses.npy"), np.array(all_train_l1))
+    np.save(os.path.join(save_dir, "train_l2_losses.npy"), np.array(all_train_l2))
+    np.save(os.path.join(save_dir, "val_l1_losses.npy"),   np.array(all_val_l1))
+    np.save(os.path.join(save_dir, "val_l2_losses.npy"),   np.array(all_val_l2))
+    print("Saved loss arrays: train_l1_losses.npy, train_l2_losses.npy, "
+          "val_l1_losses.npy, val_l2_losses.npy")
 
-    # ── Save best model ───────────────────────────────────────────────────────
-    model_path = os.path.join(save_dir, "model_best.pth")
-    torch.save(best_model.state_dict(), model_path)
-    print(f"Saved best model to: {model_path}")
+    # ── Reconstruct best models from saved state dicts ────────────────────────
+    model_l1 = CNN(1, BASE_CHANNELS, DROPOUT).to(device)
+    model_l1.load_state_dict({k: v.to(device) for k, v in global_best_l1_state.items()})
+    model_l1.eval()
 
-    # ── Training set image visualizations (2 images) ─────────────────────────
-    best_model.eval()
+    model_l2 = CNN(1, BASE_CHANNELS, DROPOUT).to(device)
+    model_l2.load_state_dict({k: v.to(device) for k, v in global_best_l2_state.items()})
+    model_l2.eval()
+
+    torch.save(global_best_l1_state, os.path.join(save_dir, "model_best_L1.pth"))
+    torch.save(global_best_l2_state, os.path.join(save_dir, "model_best_L2.pth"))
+    print(f"Saved model_best_L1.pth  (best val L1: {global_best_val_l1:.6f})")
+    print(f"Saved model_best_L2.pth  (best val L2: {global_best_val_l2:.6f})")
+
+    # ── Training/validation image visualizations (best L1 model) ─────────────
     for idx in [0, 1]:
-        plot_train_sample(
-            best_model, best_train_subset, index=idx,
-            title=f"Train Sample {idx} — Base CNN L1",
-            device=device, save_dir=save_dir,
-        )
-
-    # ── Validation set image visualizations (2 images) ───────────────────────
+        plot_train_sample(model_l1, best_train_subset, index=idx,
+                          title=f"Train Sample {idx} — Best L1 Model",
+                          device=device, save_dir=save_dir)
     for idx in [0, 1]:
-        plot_train_sample(
-            best_model, best_val_subset, index=idx,
-            title=f"Val Sample {idx} — Base CNN L1",
-            device=device, save_dir=save_dir,
-        )
+        plot_train_sample(model_l1, best_val_subset, index=idx,
+                          title=f"Val Sample {idx} — Best L1 Model",
+                          device=device, save_dir=save_dir)
 
-    # ── Test set: denoise all images and save as .npz ─────────────────────────
+    # ── Test set: denoise with both models, compute PSNR, save predictions ────
     test_noisy_raw    = np.load(os.path.join(_dir, TEST_NOISY)).astype(np.float32)
     test_noisy_norm   = normalize_data(test_noisy_raw)
     test_noisy_tensor = torch.tensor(test_noisy_norm).unsqueeze(1)
 
-    best_model.eval()
-    denoised_list = []
-    pin = device.type == 'cuda'
-    test_loader = DataLoader(
-        TensorDataset(test_noisy_tensor),
-        batch_size=BATCH_SIZE, shuffle=False,
-        num_workers=4, pin_memory=pin,
-    )
-    with torch.no_grad():
-        for (batch,) in test_loader:
-            out = best_model(batch.to(device)).cpu()
-            denoised_list.append(out)
+    if TEST_CLEAN is not None:
+        test_clean_norm   = normalize_data(np.load(os.path.join(_dir, TEST_CLEAN)).astype(np.float32))
+        test_reference    = torch.tensor(test_clean_norm).unsqueeze(1)
+        psnr_ref_label    = "clean GT"
+    else:
+        test_reference = test_noisy_tensor
+        psnr_ref_label = "noisy input (no clean GT provided — set TEST_CLEAN to enable proper PSNR)"
 
-    denoised_np = torch.cat(denoised_list, dim=0).squeeze(1).numpy()  # (N, H, W)
-    denoised_np = (denoised_np * 255.0).clip(0, 255).astype(np.float32)
+    print(f"\nPSNR reference: {psnr_ref_label}")
+    for model, label, pred_fname in [
+        (model_l1, "L1", "ferrini_prediction_L1.npz"),
+        (model_l2, "L2", "ferrini_prediction_L2.npz"),
+    ]:
+        denoised = denoise_dataset(model, test_noisy_tensor, BATCH_SIZE, device)
+        mean_psnr = compute_mean_psnr(denoised, test_reference)
+        print(f"Model {label} — Mean PSNR: {mean_psnr:.4f} dB")
 
-    pred_path = os.path.join(save_dir, "ferrini_prediction.npz")
-    np.savez(pred_path, denoised_images=denoised_np)
-    print(f"Saved test predictions to: {pred_path}")
+        denoised_np = (denoised.squeeze(1).numpy() * 255.0).clip(0, 255).astype(np.float32)
+        np.savez(os.path.join(save_dir, pred_fname), denoised_images=denoised_np)
+        print(f"Saved test predictions to: {pred_fname}")
 
-    # ── Test set image visualizations (2 images, no clean GT) ────────────────
-    for idx in [0, 1]:
-        plot_test_sample(
-            best_model, test_noisy_tensor[idx],
-            index=idx,
-            title=f"Test Sample {idx} — Base CNN L1",
-            device=device, save_dir=save_dir,
-        )
+        for idx in [0, 1]:
+            plot_test_sample(model, test_noisy_tensor[idx], index=idx,
+                             title=f"Test Sample {idx} — Best {label} Model",
+                             device=device, save_dir=save_dir)
 
     print("\nDone.")
